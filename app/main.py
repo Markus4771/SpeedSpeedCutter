@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
 from app.analyzer import detect_speech_candidates
+from app.transcriber import merge_transcript_segments, transcribe_with_vad
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 RECORDINGS_DIR = BASE_DIR / "recordings"
@@ -21,7 +22,7 @@ DB_PATH = DATA_DIR / "speedspeechcutter.db"
 for directory in (RECORDINGS_DIR, EXPORTS_DIR, DATA_DIR):
     directory.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="SpeedSpeechCutter", version="0.2.0")
+app = FastAPI(title="SpeedSpeechCutter", version="0.3.0")
 
 
 def db() -> sqlite3.Connection:
@@ -54,6 +55,16 @@ class CutCreate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     start_seconds: float = Field(ge=0)
     end_seconds: float = Field(gt=0)
+
+
+class WhisperAnalyzeRequest(BaseModel):
+    filename: str
+    model_size: str = Field(default="small", pattern="^(tiny|base|small|medium|large-v3)$")
+    language: str = Field(default="de", min_length=2, max_length=10)
+    min_silence_ms: int = Field(default=1200, ge=200, le=10000)
+    merge_gap: float = Field(default=12.0, ge=0, le=120)
+    min_speech: float = Field(default=20.0, ge=1, le=3600)
+    padding: float = Field(default=2.0, ge=0, le=30)
 
 
 class AnalyzeRequest(BaseModel):
@@ -96,7 +107,7 @@ def recording_duration(path: Path) -> float:
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "version": "0.2.0"}
+    return {"status": "ok", "version": "0.3.0"}
 
 
 @app.get("/api/recordings")
@@ -143,6 +154,40 @@ def analyze(request: AnalyzeRequest) -> dict[str, Any]:
         "count": len(candidates),
         "candidates": candidates,
         "method": "ffmpeg-silencedetect",
+    }
+
+
+@app.post("/api/analyze/whisper")
+def analyze_whisper(request: WhisperAnalyzeRequest) -> dict[str, Any]:
+    source = safe_recording(request.filename)
+    duration = recording_duration(source)
+    if duration <= 0:
+        raise HTTPException(status_code=422, detail="Videodauer konnte nicht ermittelt werden")
+    try:
+        transcript = transcribe_with_vad(
+            source,
+            model_size=request.model_size,
+            language=request.language,
+            min_silence_ms=request.min_silence_ms,
+        )
+        candidates = merge_transcript_segments(
+            transcript["segments"],
+            merge_gap=request.merge_gap,
+            min_duration=request.min_speech,
+            padding=request.padding,
+            total_duration=duration,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Whisper/VAD-Analyse fehlgeschlagen: {exc}") from exc
+
+    return {
+        "filename": request.filename,
+        "duration": duration,
+        "count": len(candidates),
+        "candidates": candidates,
+        "language": transcript["language"],
+        "language_probability": transcript["language_probability"],
+        "method": "faster-whisper+silero-vad",
     }
 
 
@@ -238,7 +283,7 @@ button{cursor:pointer;background:#2563eb;border:0;font-weight:600}button.seconda
 </style>
 </head>
 <body><main>
-<h1>SpeedSpeechCutter <span class="small">0.2.0</span></h1>
+<h1>SpeedSpeechCutter <span class="small">0.3.0</span></h1>
 <div class="muted">Redebeiträge aus einer durchgehenden Veranstaltungsaufnahme schneiden.</div>
 <div class="grid">
 <section>
@@ -259,7 +304,7 @@ button{cursor:pointer;background:#2563eb;border:0;font-weight:600}button.seconda
 <div><label>Rede min. s</label><input id="minspeech" type="number" value="20" step="1"></div>
 <div><label>Vor/Nachlauf s</label><input id="padding" type="number" value="2" step=".5"></div>
 </div>
-<button onclick="analyze()">Aufnahme analysieren</button>
+<div class="row"><button onclick="analyze()">Schnellanalyse</button><button onclick="analyzeWhisper()">Whisper + VAD</button></div>
 <div id="analysisStatus" class="small status"></div>
 <div id="candidates"></div>
 </div>
@@ -306,6 +351,17 @@ async function analyze(){
  if(!r.ok){status.textContent='Fehler: '+(data.detail||JSON.stringify(data));return}
  status.textContent=data.count+' Vorschläge gefunden. Jeder Vorschlag muss redaktionell geprüft werden.';
  box.innerHTML=data.candidates.map((x,i)=>`<div class="candidate"><b>Vorschlag ${i+1}</b><div class="small">${fmt(x.start_seconds)} – ${fmt(x.end_seconds)} · ${fmt(x.duration)}</div><button class="secondary" onclick="useCandidate(${i},${x.start_seconds},${x.end_seconds})">In Schnitt übernehmen</button></div>`).join('');
+}
+async function analyzeWhisper(){
+ const status=document.getElementById('analysisStatus');
+ const box=document.getElementById('candidates');
+ status.textContent='Whisper/VAD-Analyse läuft … Beim ersten Start wird das Modell geladen.'; box.innerHTML='';
+ const body={filename:rec.value,model_size:'small',language:'de',min_silence_ms:Math.round(+silence.value*1000),merge_gap:+gap.value,min_speech:+minspeech.value,padding:+padding.value};
+ const r=await fetch('/api/analyze/whisper',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+ const data=await r.json();
+ if(!r.ok){status.textContent='Fehler: '+(data.detail||JSON.stringify(data));return}
+ status.textContent=data.count+' Sprachbeiträge gefunden · Sprache: '+data.language+' ('+Math.round(data.language_probability*100)+' %).';
+ box.innerHTML=data.candidates.map((x,i)=>`<div class="candidate"><b>Sprachvorschlag ${i+1}</b><div class="small">${fmt(x.start_seconds)} – ${fmt(x.end_seconds)} · ${fmt(x.duration)}</div><div>${esc(x.text||'')}</div><button class="secondary" onclick="useCandidate(${i},${x.start_seconds},${x.end_seconds})">In Schnitt übernehmen</button></div>`).join('');
 }
 async function saveCut(){
  const body={filename:rec.value,title:document.getElementById('title').value||'Rede',start_seconds:+document.getElementById('start').value,end_seconds:+document.getElementById('end').value};
