@@ -1,18 +1,39 @@
 # SpeedSpeechCutter
 
-SpeedSpeechCutter unterstützt den schnellen Zuschnitt einzelner Redebeiträge aus einer durchgehenden Veranstaltungsaufzeichnung.
+SpeedSpeechCutter beschleunigt den Zuschnitt einzelner Redebeiträge aus einer durchgehenden Veranstaltungsaufzeichnung. Die Originalaufnahme bleibt unverändert; automatisch erkannte Schnittpunkte werden als Vorschläge angezeigt und vom Bediener geprüft.
 
-## Ziel von 0.1.0
+## Version 0.2.0
 
-- vorhandene Videoaufnahmen einlesen
-- Videodauer und technische Metadaten bestimmen
-- Schnittmarken (Start/Ende) erfassen
-- Schnittmarken in einer Weboberfläche verwalten
-- Vorschau per Browser
-- Redebeiträge mit FFmpeg als eigene MP4-Dateien exportieren
-- Originalaufnahme bleibt unverändert
+### Bereits umgesetzt
 
-Die automatische Redenerkennung wird ab 0.2.x ergänzt. Version 0.1.0 bildet zunächst den heutigen manuellen Arbeitsablauf digital und reproduzierbar ab.
+- vorhandene Videoaufnahmen aus `recordings/` einlesen
+- Videodauer und technische Metadaten mit ffprobe bestimmen
+- Videovorschau im Browser
+- manuelle Start-/Endmarken
+- automatische Schnittvorschläge aus der Audiospur
+- kurze Pausen innerhalb einer Rede zusammenführen
+- Mindestlänge für einen Redebeitrag
+- konfigurierbarer Vor-/Nachlauf
+- automatische Vorschläge per Klick in den manuellen Schnitt übernehmen
+- SQLite-Speicherung der bestätigten Schnittmarken
+- framegenauer FFmpeg-Export als MP4
+- Originalaufnahme wird nicht verändert
+
+## Automatische Analyse in 0.2.0
+
+Die erste automatische Stufe verwendet FFmpegs `silencedetect`. Aus längeren Audioaktivitätsblöcken werden mögliche Redebeiträge gebildet.
+
+Standardwerte:
+
+- Stille-Schwelle: **-35 dB**
+- minimale Stille: **1,2 s**
+- Pausen bis **12 s** innerhalb eines Beitrags zusammenführen
+- Mindestlänge eines Vorschlags: **20 s**
+- Vor-/Nachlauf: **2 s**
+
+Diese Werte lassen sich in der Weboberfläche anpassen.
+
+Wichtig: In 0.2.0 wird Audioaktivität erkannt, noch keine semantische Rede. Musik, längerer Applaus oder andere laute Programmpunkte können deshalb ebenfalls in einem Vorschlag liegen. Die Vorschläge werden nicht automatisch veröffentlicht oder exportiert; der Bediener übernimmt und korrigiert sie.
 
 ## Architektur
 
@@ -39,38 +60,52 @@ mkdir -p data recordings exports
 uvicorn app.main:app --host 0.0.0.0 --port 8102
 ```
 
-Danach im Browser öffnen:
+Danach:
 
 ```
 http://SERVER-IP:8102
 ```
 
-## Ablauf
+## Arbeitsablauf
 
-1. Videodatei nach `recordings/` kopieren.
+1. Durchgehende Aufnahme nach `recordings/` kopieren.
 2. Aufnahme in der Weboberfläche auswählen.
-3. Start- und Endzeit der Rede eingeben.
-4. Schnittmarke speichern.
-5. Export starten.
-6. Fertige Datei liegt unter `exports/`.
+3. **Aufnahme analysieren** starten.
+4. Gefundene Vorschläge prüfen.
+5. Einen Vorschlag in den Schnitt übernehmen.
+6. Start/Ende bei Bedarf am Video korrigieren.
+7. Schnittmarke speichern.
+8. Fertige Rede exportieren.
+9. MP4 liegt unter `exports/`.
+
+## API
+
+- `GET /health`
+- `GET /api/recordings`
+- `GET /api/recordings/{filename}/info`
+- `POST /api/analyze`
+- `GET /api/cuts`
+- `POST /api/cuts`
+- `DELETE /api/cuts/{id}`
+- `POST /api/cuts/{id}/export`
 
 ## Roadmap
 
 ### 0.1.x
-Manuelle Schnittmarken + FFmpeg-Export.
+Manuelle Schnittmarken + FFmpeg-Export. Erledigt.
 
 ### 0.2.x
-Automatische Spracherkennung (VAD) und Vorschläge für Anfang/Ende.
+Automatische Audioanalyse und Schnittvorschläge. Aktueller Stand.
 
 ### 0.3.x
-Whisper-Transkription und automatische Titel.
+Echte Sprachaktivitätserkennung (VAD) plus Whisper-Transkription. Dadurch sollen Musik und Applaus besser von gesprochenen Beiträgen getrennt werden.
 
 ### 0.4.x
-Sprecherwechsel / Rednererkennung.
+Sprecherwechsel / Rednererkennung sowie automatische Zuordnung von Redebeiträgen.
 
 ### 0.5.x
-Direkte Blackmagic-Capture-Unterstützung und Live-Ringpuffer.
+Direkte Blackmagic-Capture-Unterstützung, Live-Ringpuffer und Analyse während der laufenden Aufnahme.
 
-## Sicherheit / redaktioneller Workflow
+## Redaktioneller Workflow
 
-Automatisch erkannte Schnittpunkte sind Vorschläge. Die redaktionelle Freigabe bleibt beim Bediener.
+Automatisch erkannte Schnittpunkte sind ausschließlich Vorschläge. Die Auswahl, Korrektur und Freigabe eines Redebeitrags erfolgt durch den Bediener.
