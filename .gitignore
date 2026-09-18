@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+data/*.db
+recordings/*
+!recordings/.gitkeep
+exports/*
+!exports/.gitkeep
+.DS_Store
