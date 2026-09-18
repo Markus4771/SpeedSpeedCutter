@@ -164,7 +164,7 @@ def export_cut(cut_id: int) -> dict[str, str]:
     command = [
         "ffmpeg", "-y",
         "-ss", str(row["start_seconds"]),
-        "-to", str(row["end_seconds"]),
+        "-t", str(row["end_seconds"] - row["start_seconds"]),
         "-i", str(source),
         "-c:v", "libx264",
         "-preset", "veryfast",
