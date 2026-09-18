@@ -2,7 +2,7 @@
 
 SpeedSpeechCutter beschleunigt den Zuschnitt einzelner Redebeiträge aus einer durchgehenden Veranstaltungsaufzeichnung. Die Originalaufnahme bleibt unverändert; automatisch erkannte Schnittpunkte werden als Vorschläge angezeigt und vom Bediener geprüft.
 
-## Version 0.2.0
+## Version 0.3.0
 
 ### Bereits umgesetzt
 
@@ -19,7 +19,7 @@ SpeedSpeechCutter beschleunigt den Zuschnitt einzelner Redebeiträge aus einer d
 - framegenauer FFmpeg-Export als MP4
 - Originalaufnahme wird nicht verändert
 
-## Automatische Analyse in 0.2.0
+## Automatische Analyse
 
 Die erste automatische Stufe verwendet FFmpegs `silencedetect`. Aus längeren Audioaktivitätsblöcken werden mögliche Redebeiträge gebildet.
 
@@ -95,10 +95,10 @@ http://SERVER-IP:8102
 Manuelle Schnittmarken + FFmpeg-Export. Erledigt.
 
 ### 0.2.x
-Automatische Audioanalyse und Schnittvorschläge. Aktueller Stand.
+Automatische Audioanalyse und Schnittvorschläge. Erledigt.
 
 ### 0.3.x
-Echte Sprachaktivitätserkennung (VAD) plus Whisper-Transkription. Dadurch sollen Musik und Applaus besser von gesprochenen Beiträgen getrennt werden.
+Whisper-Transkription mit Silero-VAD und sprachbasierten Schnittvorschlägen. Aktueller Stand.
 
 ### 0.4.x
 Sprecherwechsel / Rednererkennung sowie automatische Zuordnung von Redebeiträgen.
@@ -109,3 +109,20 @@ Direkte Blackmagic-Capture-Unterstützung, Live-Ringpuffer und Analyse während 
 ## Redaktioneller Workflow
 
 Automatisch erkannte Schnittpunkte sind ausschließlich Vorschläge. Die Auswahl, Korrektur und Freigabe eines Redebeitrags erfolgt durch den Bediener.
+
+
+## Neu in 0.3.0
+
+Zusätzlich zur schnellen FFmpeg-Audioanalyse gibt es jetzt **Whisper + VAD**:
+
+- `faster-whisper` für deutsche Transkription
+- integrierter Silero-VAD-Filter zur Erkennung tatsächlicher Sprache
+- sprachbasierte Segmente statt nur Lautstärkeaktivität
+- Transkript wird direkt beim Schnittvorschlag angezeigt
+- Modellgröße derzeit standardmäßig `small`
+- CPU-Betrieb mit `int8`
+- `POST /api/analyze/whisper`
+
+Beim ersten Whisper-Lauf wird das Modell geladen. Dafür ist Internetzugriff auf dem Server erforderlich; anschließend kann das Modell aus dem lokalen Cache verwendet werden.
+
+Auch Whisper/VAD kann Applaus, Zwischenrufe oder schwierige Hall-Situationen nicht perfekt einordnen. Schnittpunkte bleiben deshalb redaktionelle Vorschläge.
