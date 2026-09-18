@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from app.analyzer import detect_speech_candidates
 from app.transcriber import merge_transcript_segments, transcribe_with_vad
+from app.diarizer import diarize, speaker_blocks
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 RECORDINGS_DIR = BASE_DIR / "recordings"
@@ -22,7 +23,7 @@ DB_PATH = DATA_DIR / "speedspeechcutter.db"
 for directory in (RECORDINGS_DIR, EXPORTS_DIR, DATA_DIR):
     directory.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="SpeedSpeechCutter", version="0.3.0")
+app = FastAPI(title="SpeedSpeechCutter", version="0.4.0")
 
 
 def db() -> sqlite3.Connection:
@@ -67,6 +68,15 @@ class WhisperAnalyzeRequest(BaseModel):
     padding: float = Field(default=2.0, ge=0, le=30)
 
 
+class DiarizationRequest(BaseModel):
+    filename: str
+    min_speakers: int | None = Field(default=None, ge=1, le=50)
+    max_speakers: int | None = Field(default=None, ge=1, le=100)
+    min_turn_duration: float = Field(default=8.0, ge=1, le=3600)
+    merge_same_speaker_gap: float = Field(default=4.0, ge=0, le=60)
+    padding: float = Field(default=1.5, ge=0, le=30)
+
+
 class AnalyzeRequest(BaseModel):
     filename: str
     noise_db: float = Field(default=-35.0, ge=-80, le=-5)
@@ -107,7 +117,7 @@ def recording_duration(path: Path) -> float:
 
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "version": "0.3.0"}
+    return {"status": "ok", "version": "0.4.0"}
 
 
 @app.get("/api/recordings")
@@ -188,6 +198,50 @@ def analyze_whisper(request: WhisperAnalyzeRequest) -> dict[str, Any]:
         "language": transcript["language"],
         "language_probability": transcript["language_probability"],
         "method": "faster-whisper+silero-vad",
+    }
+
+
+@app.post("/api/analyze/speakers")
+def analyze_speakers(request: DiarizationRequest) -> dict[str, Any]:
+    source = safe_recording(request.filename)
+    duration = recording_duration(source)
+    if duration <= 0:
+        raise HTTPException(status_code=422, detail="Videodauer konnte nicht ermittelt werden")
+    if (
+        request.min_speakers is not None
+        and request.max_speakers is not None
+        and request.min_speakers > request.max_speakers
+    ):
+        raise HTTPException(status_code=422, detail="min_speakers darf nicht größer als max_speakers sein")
+
+    try:
+        result = diarize(
+            source,
+            min_speakers=request.min_speakers,
+            max_speakers=request.max_speakers,
+        )
+        candidates = speaker_blocks(
+            result["turns"],
+            min_turn_duration=request.min_turn_duration,
+            merge_same_speaker_gap=request.merge_same_speaker_gap,
+            padding=request.padding,
+            total_duration=duration,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Sprecheranalyse fehlgeschlagen: {exc}") from exc
+
+    return {
+        "filename": request.filename,
+        "duration": duration,
+        "speaker_count": result["speaker_count"],
+        "model": result["model"],
+        "turn_count": len(result["turns"]),
+        "count": len(candidates),
+        "candidates": candidates,
+        "turns": result["turns"],
+        "method": "pyannote-community-1",
     }
 
 
@@ -283,7 +337,7 @@ button{cursor:pointer;background:#2563eb;border:0;font-weight:600}button.seconda
 </style>
 </head>
 <body><main>
-<h1>SpeedSpeechCutter <span class="small">0.3.0</span></h1>
+<h1>SpeedSpeechCutter <span class="small">0.4.0</span></h1>
 <div class="muted">Redebeiträge aus einer durchgehenden Veranstaltungsaufnahme schneiden.</div>
 <div class="grid">
 <section>
@@ -304,7 +358,7 @@ button{cursor:pointer;background:#2563eb;border:0;font-weight:600}button.seconda
 <div><label>Rede min. s</label><input id="minspeech" type="number" value="20" step="1"></div>
 <div><label>Vor/Nachlauf s</label><input id="padding" type="number" value="2" step=".5"></div>
 </div>
-<div class="row"><button onclick="analyze()">Schnellanalyse</button><button onclick="analyzeWhisper()">Whisper + VAD</button></div>
+<div class="row"><button onclick="analyze()">Schnellanalyse</button><button onclick="analyzeWhisper()">Whisper + VAD</button></div><button onclick="analyzeSpeakers()">Sprecherwechsel erkennen</button>
 <div id="analysisStatus" class="small status"></div>
 <div id="candidates"></div>
 </div>
@@ -362,6 +416,24 @@ async function analyzeWhisper(){
  if(!r.ok){status.textContent='Fehler: '+(data.detail||JSON.stringify(data));return}
  status.textContent=data.count+' Sprachbeiträge gefunden · Sprache: '+data.language+' ('+Math.round(data.language_probability*100)+' %).';
  box.innerHTML=data.candidates.map((x,i)=>`<div class="candidate"><b>Sprachvorschlag ${i+1}</b><div class="small">${fmt(x.start_seconds)} – ${fmt(x.end_seconds)} · ${fmt(x.duration)}</div><div>${esc(x.text||'')}</div><button class="secondary" onclick="useCandidate(${i},${x.start_seconds},${x.end_seconds})">In Schnitt übernehmen</button></div>`).join('');
+}
+async function analyzeSpeakers(){
+ const status=document.getElementById('analysisStatus');
+ const box=document.getElementById('candidates');
+ status.textContent='Sprecheranalyse läuft …'; box.innerHTML='';
+ const body={filename:rec.value,min_turn_duration:8,merge_same_speaker_gap:4,padding:+padding.value};
+ const r=await fetch('/api/analyze/speakers',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+ const data=await r.json();
+ if(!r.ok){status.textContent='Fehler: '+(data.detail||JSON.stringify(data));return}
+ status.textContent=data.speaker_count+' Sprecher erkannt · '+data.count+' längere Sprecherblöcke gefunden.';
+ box.innerHTML=data.candidates.map((x,i)=>`<div class="candidate"><b>${esc(x.speaker)} · Block ${i+1}</b><div class="small">${fmt(x.start_seconds)} – ${fmt(x.end_seconds)} · ${fmt(x.duration)}</div><button class="secondary" onclick="useSpeakerCandidate('${esc(x.speaker)}',${x.start_seconds},${x.end_seconds})">In Schnitt übernehmen</button></div>`).join('');
+}
+function useSpeakerCandidate(speaker,start,end){
+ document.getElementById('title').value='Rede '+speaker;
+ document.getElementById('start').value=start.toFixed(3);
+ document.getElementById('end').value=end.toFixed(3);
+ video.currentTime=start;
+ window.scrollTo({top:0,behavior:'smooth'});
 }
 async function saveCut(){
  const body={filename:rec.value,title:document.getElementById('title').value||'Rede',start_seconds:+document.getElementById('start').value,end_seconds:+document.getElementById('end').value};
