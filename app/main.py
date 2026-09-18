@@ -10,6 +10,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
+from app.analyzer import detect_speech_candidates
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 RECORDINGS_DIR = BASE_DIR / "recordings"
 EXPORTS_DIR = BASE_DIR / "exports"
@@ -19,7 +21,7 @@ DB_PATH = DATA_DIR / "speedspeechcutter.db"
 for directory in (RECORDINGS_DIR, EXPORTS_DIR, DATA_DIR):
     directory.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="SpeedSpeechCutter", version="0.1.0")
+app = FastAPI(title="SpeedSpeechCutter", version="0.2.0")
 
 
 def db() -> sqlite3.Connection:
@@ -54,6 +56,15 @@ class CutCreate(BaseModel):
     end_seconds: float = Field(gt=0)
 
 
+class AnalyzeRequest(BaseModel):
+    filename: str
+    noise_db: float = Field(default=-35.0, ge=-80, le=-5)
+    silence_duration: float = Field(default=1.2, ge=0.2, le=20)
+    merge_gap: float = Field(default=12.0, ge=0, le=120)
+    min_speech: float = Field(default=20.0, ge=1, le=3600)
+    padding: float = Field(default=2.0, ge=0, le=30)
+
+
 def safe_recording(filename: str) -> Path:
     candidate = (RECORDINGS_DIR / filename).resolve()
     if candidate.parent != RECORDINGS_DIR.resolve() or not candidate.is_file():
@@ -64,14 +75,10 @@ def safe_recording(filename: str) -> Path:
 def probe(path: Path) -> dict[str, Any]:
     process = subprocess.run(
         [
-            "ffprobe",
-            "-v",
-            "error",
+            "ffprobe", "-v", "error",
             "-show_entries",
             "format=duration,format_name:stream=index,codec_type,codec_name,width,height,r_frame_rate",
-            "-of",
-            "json",
-            str(path),
+            "-of", "json", str(path),
         ],
         check=False,
         capture_output=True,
@@ -82,9 +89,14 @@ def probe(path: Path) -> dict[str, Any]:
     return json.loads(process.stdout)
 
 
+def recording_duration(path: Path) -> float:
+    info = probe(path)
+    return float(info.get("format", {}).get("duration") or 0)
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
-    return {"status": "ok", "version": "0.1.0"}
+    return {"status": "ok", "version": "0.2.0"}
 
 
 @app.get("/api/recordings")
@@ -94,8 +106,7 @@ def recordings() -> list[dict[str, Any]]:
         if not path.is_file() or path.name.startswith("."):
             continue
         try:
-            info = probe(path)
-            duration = float(info.get("format", {}).get("duration") or 0)
+            duration = recording_duration(path)
         except Exception:
             duration = 0
         result.append({"filename": path.name, "duration": duration, "size": path.stat().st_size})
@@ -105,6 +116,34 @@ def recordings() -> list[dict[str, Any]]:
 @app.get("/api/recordings/{filename}/info")
 def recording_info(filename: str) -> dict[str, Any]:
     return probe(safe_recording(filename))
+
+
+@app.post("/api/analyze")
+def analyze(request: AnalyzeRequest) -> dict[str, Any]:
+    source = safe_recording(request.filename)
+    duration = recording_duration(source)
+    if duration <= 0:
+        raise HTTPException(status_code=422, detail="Videodauer konnte nicht ermittelt werden")
+    try:
+        candidates = detect_speech_candidates(
+            source,
+            duration,
+            noise_db=request.noise_db,
+            silence_duration=request.silence_duration,
+            merge_gap=request.merge_gap,
+            min_speech=request.min_speech,
+            padding=request.padding,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return {
+        "filename": request.filename,
+        "duration": duration,
+        "count": len(candidates),
+        "candidates": candidates,
+        "method": "ffmpeg-silencedetect",
+    }
 
 
 @app.get("/media/{filename}")
@@ -125,8 +164,7 @@ def create_cut(cut: CutCreate) -> dict[str, Any]:
     if cut.end_seconds <= cut.start_seconds:
         raise HTTPException(status_code=422, detail="Ende muss nach dem Start liegen")
 
-    info = probe(source)
-    duration = float(info.get("format", {}).get("duration") or 0)
+    duration = recording_duration(source)
     if duration and cut.end_seconds > duration:
         raise HTTPException(status_code=422, detail="Ende liegt hinter dem Aufnahmeende")
 
@@ -160,7 +198,6 @@ def export_cut(cut_id: int) -> dict[str, str]:
     safe_title = "".join(c if c.isalnum() or c in "-_" else "_" for c in row["title"]).strip("_") or f"rede_{cut_id}"
     output = EXPORTS_DIR / f"{cut_id:04d}_{safe_title}.mp4"
 
-    # Re-encode für framegenaue Schnitte; Copy-Modus kommt später als Option hinzu.
     command = [
         "ffmpeg", "-y",
         "-ss", str(row["start_seconds"]),
@@ -177,7 +214,6 @@ def export_cut(cut_id: int) -> dict[str, str]:
     process = subprocess.run(command, check=False, capture_output=True, text=True)
     if process.returncode != 0:
         raise HTTPException(status_code=500, detail=process.stderr[-3000:])
-
     return {"filename": output.name, "path": str(output)}
 
 
@@ -191,29 +227,41 @@ def index() -> str:
 <title>SpeedSpeechCutter</title>
 <style>
 body{font-family:system-ui,sans-serif;margin:0;background:#111827;color:#e5e7eb}
-main{max-width:1200px;margin:auto;padding:24px}
-h1{margin-bottom:4px}.muted{color:#9ca3af}
-.grid{display:grid;grid-template-columns:2fr 1fr;gap:20px}
-.card{background:#1f2937;border-radius:12px;padding:18px;margin-top:20px}
-video{width:100%;background:#000;border-radius:8px;max-height:62vh}
+main{max-width:1250px;margin:auto;padding:24px} h1{margin-bottom:4px}.muted{color:#9ca3af}
+.grid{display:grid;grid-template-columns:2fr 1fr;gap:20px}.card{background:#1f2937;border-radius:12px;padding:18px;margin-top:20px}
+video{width:100%;background:#000;border-radius:8px;max-height:58vh}
 input,select,button{box-sizing:border-box;width:100%;padding:10px;margin:5px 0 10px;border-radius:7px;border:1px solid #4b5563;background:#111827;color:#fff}
-button{cursor:pointer;background:#2563eb;border:0;font-weight:600}
-button.secondary{background:#374151}.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.cut{border-top:1px solid #374151;padding:12px 0}
-.small{font-size:.9rem;color:#9ca3af}
-@media(max-width:850px){.grid{grid-template-columns:1fr}}
+button{cursor:pointer;background:#2563eb;border:0;font-weight:600}button.secondary{background:#374151}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}.settings{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.cut,.candidate{border-top:1px solid #374151;padding:12px 0}.small{font-size:.9rem;color:#9ca3af}.status{min-height:22px}
+@media(max-width:850px){.grid{grid-template-columns:1fr}.settings{grid-template-columns:1fr 1fr}}
 </style>
 </head>
 <body><main>
-<h1>SpeedSpeechCutter <span class="small">0.1.0</span></h1>
+<h1>SpeedSpeechCutter <span class="small">0.2.0</span></h1>
 <div class="muted">Redebeiträge aus einer durchgehenden Veranstaltungsaufnahme schneiden.</div>
 <div class="grid">
-<section class="card">
+<section>
+<div class="card">
 <select id="recording"></select>
 <video id="video" controls></video>
 <div class="row">
 <button class="secondary" onclick="setStart()">Aktuelle Zeit = START</button>
 <button class="secondary" onclick="setEnd()">Aktuelle Zeit = ENDE</button>
+</div>
+</div>
+<div class="card">
+<h3>Automatische Schnittvorschläge</h3>
+<div class="settings">
+<div><label>Schwelle dB</label><input id="noise" type="number" value="-35" step="1"></div>
+<div><label>Stille min. s</label><input id="silence" type="number" value="1.2" step=".1"></div>
+<div><label>Pausen verbinden s</label><input id="gap" type="number" value="12" step="1"></div>
+<div><label>Rede min. s</label><input id="minspeech" type="number" value="20" step="1"></div>
+<div><label>Vor/Nachlauf s</label><input id="padding" type="number" value="2" step=".5"></div>
+</div>
+<button onclick="analyze()">Aufnahme analysieren</button>
+<div id="analysisStatus" class="small status"></div>
+<div id="candidates"></div>
 </div>
 </section>
 <section class="card">
@@ -223,21 +271,42 @@ button.secondary{background:#374151}.row{display:grid;grid-template-columns:1fr 
 <div><label>Ende (Sek.)</label><input id="end" type="number" step="0.001" value="0"></div>
 </div>
 <button onclick="saveCut()">Schnittmarke speichern</button>
+<h3>Gespeicherte Schnitte</h3>
 <div id="cuts"></div>
 </section>
 </div>
 </main>
 <script>
 const rec=document.getElementById('recording'), video=document.getElementById('video');
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt=s=>{const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),x=(s%60).toFixed(1);return (h?String(h).padStart(2,'0')+':':'')+String(m).padStart(2,'0')+':'+String(x).padStart(4,'0')};
 async function loadRecordings(){
  const items=await (await fetch('/api/recordings')).json();
- rec.innerHTML=items.map(x=>`<option value="${x.filename}">${x.filename} (${x.duration.toFixed(1)} s)</option>`).join('');
- if(items.length){selectRecording();}
+ rec.innerHTML=items.map(x=>`<option value="${esc(x.filename)}">${esc(x.filename)} (${fmt(x.duration)})</option>`).join('');
+ if(items.length) selectRecording();
 }
 function selectRecording(){if(rec.value) video.src='/media/'+encodeURIComponent(rec.value)}
 rec.onchange=selectRecording;
 function setStart(){document.getElementById('start').value=video.currentTime.toFixed(3)}
 function setEnd(){document.getElementById('end').value=video.currentTime.toFixed(3)}
+function useCandidate(i,start,end){
+ document.getElementById('title').value='Rede '+String(i+1).padStart(3,'0');
+ document.getElementById('start').value=start.toFixed(3);
+ document.getElementById('end').value=end.toFixed(3);
+ video.currentTime=start;
+ window.scrollTo({top:0,behavior:'smooth'});
+}
+async function analyze(){
+ const status=document.getElementById('analysisStatus');
+ const box=document.getElementById('candidates');
+ status.textContent='Analyse läuft …'; box.innerHTML='';
+ const body={filename:rec.value,noise_db:+noise.value,silence_duration:+silence.value,merge_gap:+gap.value,min_speech:+minspeech.value,padding:+padding.value};
+ const r=await fetch('/api/analyze',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+ const data=await r.json();
+ if(!r.ok){status.textContent='Fehler: '+(data.detail||JSON.stringify(data));return}
+ status.textContent=data.count+' Vorschläge gefunden. Jeder Vorschlag muss redaktionell geprüft werden.';
+ box.innerHTML=data.candidates.map((x,i)=>`<div class="candidate"><b>Vorschlag ${i+1}</b><div class="small">${fmt(x.start_seconds)} – ${fmt(x.end_seconds)} · ${fmt(x.duration)}</div><button class="secondary" onclick="useCandidate(${i},${x.start_seconds},${x.end_seconds})">In Schnitt übernehmen</button></div>`).join('');
+}
 async function saveCut(){
  const body={filename:rec.value,title:document.getElementById('title').value||'Rede',start_seconds:+document.getElementById('start').value,end_seconds:+document.getElementById('end').value};
  const r=await fetch('/api/cuts',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
@@ -251,7 +320,7 @@ async function exportCut(id){
 async function deleteCut(id){await fetch('/api/cuts/'+id,{method:'DELETE'});await loadCuts()}
 async function loadCuts(){
  const items=await (await fetch('/api/cuts')).json();
- document.getElementById('cuts').innerHTML=items.map(x=>`<div class="cut"><b>${x.title}</b><div class="small">${x.filename}<br>${x.start_seconds.toFixed(3)} s – ${x.end_seconds.toFixed(3)} s</div><div class="row"><button onclick="exportCut(${x.id})">Exportieren</button><button class="secondary" onclick="deleteCut(${x.id})">Löschen</button></div></div>`).join('');
+ document.getElementById('cuts').innerHTML=items.map(x=>`<div class="cut"><b>${esc(x.title)}</b><div class="small">${esc(x.filename)}<br>${fmt(x.start_seconds)} – ${fmt(x.end_seconds)}</div><div class="row"><button onclick="exportCut(${x.id})">Exportieren</button><button class="secondary" onclick="deleteCut(${x.id})">Löschen</button></div></div>`).join('');
 }
 loadRecordings();loadCuts();
 </script></body></html>"""
