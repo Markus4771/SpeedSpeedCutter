@@ -2,7 +2,7 @@
 
 SpeedSpeechCutter beschleunigt den Zuschnitt einzelner Redebeiträge aus einer durchgehenden Veranstaltungsaufzeichnung. Die Originalaufnahme bleibt unverändert; automatisch erkannte Schnittpunkte werden als Vorschläge angezeigt und vom Bediener geprüft.
 
-## Version 0.3.0
+## Version 0.4.0
 
 ### Bereits umgesetzt
 
@@ -98,10 +98,10 @@ Manuelle Schnittmarken + FFmpeg-Export. Erledigt.
 Automatische Audioanalyse und Schnittvorschläge. Erledigt.
 
 ### 0.3.x
-Whisper-Transkription mit Silero-VAD und sprachbasierten Schnittvorschlägen. Aktueller Stand.
+Whisper-Transkription mit Silero-VAD und sprachbasierten Schnittvorschlägen. Erledigt.
 
 ### 0.4.x
-Sprecherwechsel / Rednererkennung sowie automatische Zuordnung von Redebeiträgen.
+Sprecherwechsel / Rednererkennung mit pyannote Community-1. Aktueller Stand.
 
 ### 0.5.x
 Direkte Blackmagic-Capture-Unterstützung, Live-Ringpuffer und Analyse während der laufenden Aufnahme.
@@ -126,3 +126,40 @@ Zusätzlich zur schnellen FFmpeg-Audioanalyse gibt es jetzt **Whisper + VAD**:
 Beim ersten Whisper-Lauf wird das Modell geladen. Dafür ist Internetzugriff auf dem Server erforderlich; anschließend kann das Modell aus dem lokalen Cache verwendet werden.
 
 Auch Whisper/VAD kann Applaus, Zwischenrufe oder schwierige Hall-Situationen nicht perfekt einordnen. Schnittpunkte bleiben deshalb redaktionelle Vorschläge.
+
+
+## Neu in 0.4.0
+
+Die Anwendung kann jetzt zusätzlich Sprecherwechsel analysieren. Dafür wird optional **pyannote.audio** mit dem Modell `pyannote/speaker-diarization-community-1` verwendet.
+
+Installation der optionalen Sprechererkennung:
+
+```bash
+source .venv/bin/activate
+pip install -r requirements-diarization.txt
+```
+
+Für den ersten Download des Community-1-Modells:
+
+1. Auf Hugging Face die Nutzungsbedingungen des Modells akzeptieren.
+2. Einen Hugging-Face-Zugriffstoken erstellen.
+3. Den Token vor dem Start setzen:
+
+```bash
+export HF_TOKEN="hf_..."
+uvicorn app.main:app --host 0.0.0.0 --port 8102
+```
+
+Alternativ kann das Modell lokal gespeichert und ohne Internet verwendet werden. Dann:
+
+```bash
+export SSC_DIARIZATION_MODEL="/opt/models/pyannote-speaker-diarization-community-1"
+```
+
+In der Oberfläche steht anschließend **Sprecherwechsel erkennen** zur Verfügung. Erkannte Sprecher erhalten zunächst technische Bezeichnungen wie `SPEAKER_00`, `SPEAKER_01` usw. Diese Bezeichnungen stellen keine Identifizierung einer realen Person dar.
+
+API:
+
+- `POST /api/analyze/speakers`
+
+Die Sprechererkennung liefert zusätzliche Schnittsignale. Sie ersetzt nicht die redaktionelle Kontrolle und entscheidet nicht automatisch, welche Person oder welcher Beitrag veröffentlicht wird.
